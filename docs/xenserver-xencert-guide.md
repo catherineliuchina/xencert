@@ -2,6 +2,10 @@
 
 # XenServer 8 Stream Shared Storage Certification kit User Guide
 
+<a href="/docs/xenserver-xencert-guide.md" download>
+  <kbd>Download</kbd>
+</a>
+
 <br>
 
 Published Mar 2023  
