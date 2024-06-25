@@ -18,7 +18,7 @@
 #
 import sys
 sys.path.append("/opt/xensource/debug/XenCert/sm")
-import util
+import utils
 import xen.lowlevel.xs
 import random
 
@@ -28,23 +28,23 @@ def help():
     print("Usage: blockunblockiscsipaths <block/unblock> <noOfPaths> <IP1>,<IP2>,...")
     sys.exit(-1)
 
-def block_ip(ip):
+def block_ip(ssh, ip):
     try:
         cmd = ['iptables', '-A', 'OUTPUT', '-d', ip, '-j', 'DROP']
-        util.pread(cmd)
+        utils.pread(ssh, cmd)
         cmd = ['iptables', '-A', 'INPUT', '-s', ip, '-j', 'DROP']
-        util.pread(cmd)
+        utils.pread(ssh, cmd)
     except Exception as e:
-        util.SMlog("There was an exception in blocking ip: %s" % ip)
+        utils.SMlog("There was an exception in blocking ip: %s" % ip)
 
-def unblock_ip(ip):
+def unblock_ip(ssh, ip):
     try:
         cmd = ['iptables', '-D', 'OUTPUT', '-d', ip, '-j', 'DROP']
-        util.pread(cmd)
+        utils.pread(ssh, cmd)
         cmd = ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP']
-        util.pread(cmd)
+        utils.pread(ssh, cmd)
     except Exception as e:
-        util.SMlog("There was an exception in unblocking ip: %s" % ip)
+        utils.SMlog("There was an exception in unblocking ip: %s" % ip)
 
 # Test Cmdline args
 xencert_print("Entering blockunblockiscsipaths")

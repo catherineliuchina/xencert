@@ -1,7 +1,7 @@
 import subprocess
 import os
 import sys
-from sm.util import SMlog
+from utils import SMlog
 
 
 logfile = None
