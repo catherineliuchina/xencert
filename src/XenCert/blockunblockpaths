@@ -25,7 +25,7 @@
 
 import sys
 sys.path.append("/opt/xensource/debug/XenCert/sm")
-import util
+import utils
 import xen.lowlevel.xs
 import os
 import time
@@ -48,7 +48,7 @@ block_unblock_over = xs_handle.read('', '/xencert/block-unblock-over')
 if len(sys.argv) == 5:
     cmd = [sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]]
     xencert_print('blockunblockpaths - now call %s and wait for block/unblock to finish.' % cmd)
-    (rc, stdout, stderr) = util.doexec(cmd, '')
+    (rc, stdout, stderr) = utils.execSSH(cmd, '')
     retVal = stdout if rc == 0 else stderr
 elif len(sys.argv) == 1:
     xencert_print('blockunblockpaths - called without any arguments, just wait for block/unblock to finish.')

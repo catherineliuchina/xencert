@@ -18,7 +18,7 @@
 #
 import sys
 sys.path.append("/opt/xensource/debug/XenCert/sm")
-import util
+import utils
 import xen.lowlevel.xs
 import random
 import os
@@ -33,7 +33,7 @@ def help():
     print("Usage: blockunblockhbapaths <block/unblock> <noOfPaths> switch-ip:username:password:port1,port2...")
     sys.exit(-1)
     
-def blockUnblockPort(blockOrUnblock, ip, username, password, port):
+def blockUnblockPort(ssh, blockOrUnblock, ip, username, password, port):
     try:
         xencert_print("In blockUnblockPort with options: %s, %s, %s, %s" % (ip, username, XenCertCommon.HIDDEN_PASSWORD, port))
         if blockOrUnblock:
@@ -41,9 +41,9 @@ def blockUnblockPort(blockOrUnblock, ip, username, password, port):
         else:
             cmd = [os.path.join(os.getcwd(),'blockunblockHBAPort-qlogic.sh'), ip, username, password, port, 'online']
         xencert_print("calling %s" % ' '.join(XenCertCommon.get_cmds_with_hidden_password(cmd)))
-        util.doexec(cmd, '')
+        utils.execSSH(ssh, cmd, '')
     except Exception as e:
-        util.SMlog("There was an exception in blocking port: %s, exception: %s" % (port, str(e)))
+        utils.SMlog("There was an exception in blocking port: %s, exception: %s" % (port, str(e)))
 
 # Test Cmdline args
 if len(sys.argv) != 4:

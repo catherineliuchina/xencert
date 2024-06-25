@@ -23,7 +23,8 @@ import random
 import xml.dom.minidom
 from XenCertLog import printout, print_on_same_line, xencert_print
 from XenCertCommon import display_operation_status, get_config_with_hidden_password
-from sm import scsiutil, util, lvutil, vhdutil, iscsilib, mpath_dmp, mpath_cli, xs_errors
+import utils
+#from sm_remove import scsiutil, util, lvutil, vhdutil, iscsilib, mpath_dmp, mpath_cli, xs_errors
 
 ISCSI_PROCNAME = "iscsi_tcp"
 dev_path = '/dev/'
@@ -52,21 +53,24 @@ DDT_DEFAULT_BLOCK_SIZE = 512  # one block size: 512 sectors, 256KB
 MSIZE_MB = 2 * 1024 * 1024  # max virt size for fast resize
 MSIZE = int(MSIZE_MB * 1024 * 1024)
 
+LVM_SIZE_INCREMENT = 4 * 1024 * 1024
+VHD_BLOCK_SIZE = 2 * 1024 * 1024
+
 
 def _init_adapters():
     # Generate a list of active adapters
     ids = scsiutil._genHostList(ISCSI_PROCNAME)
-    util.SMlog("Host ids: %s" % ids)
+    utils.SMlog("Host ids: %s" % ids)
     adapter = {}
     for host in ids:
         try:
             if hasattr(iscsilib, 'get_targetIP_and_port'):
                 (addr, port) = iscsilib.get_targetIP_and_port(host)
             else:
-                addr = util.get_single_entry(glob.glob(
+                addr = utils.get_single_entry(glob.glob(
                     '/sys/class/iscsi_host/host%s/device/session*/connection*/iscsi_connection*/persistent_address' % host)[
                                                  0])
-                port = util.get_single_entry(glob.glob(
+                port = utils.get_single_entry(glob.glob(
                     '/sys/class/iscsi_host/host%s/device/session*/connection*/iscsi_connection*/persistent_port' % host)[
                                                  0])
             adapter[host] = (addr, port)
@@ -109,37 +113,56 @@ def disable_multipathing(session, host):
         xencert_print("Exception disabling multipathing. Exception: %s" % str(e))
 
 
-def block_ip(ip):
+def block_ip(ssh, ip):
     try:
         cmd = ['iptables', '-A', 'INPUT', '-s', ip, '-j', 'DROP']
-        util.pread(cmd)
+        utils.pread(ssh, cmd)
     except Exception as e:
         xencert_print("There was an exception in blocking ip: %s. Exception: %s" % (ip, str(e)))
 
 
-def unblock_ip(ip):
+def unblock_ip(ssh, ip):
     try:
         cmd = ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP']
-        util.pread(cmd)
+        utils.pread(ssh, cmd)
     except Exception as e:
         xencert_print("There was an exception in unblocking ip: %s. Exception: %s" % (ip, str(e)))
 
 
+def calcOverheadEmpty(virtual_size):
+    """Calculate the VHD space overhead (metadata size) for an empty VDI of
+    size virtual_size"""
+    overhead = 0
+    size_mb = virtual_size // (1024 * 1024)
+
+    # Footer + footer copy + header + possible CoW parent locator fields
+    overhead = 3 * 1024
+
+    # BAT 4 Bytes per block segment
+    overhead += (size_mb // 2) * 4
+    overhead = utils.roundup(512, overhead)
+
+    # BATMAP 1 bit per block segment
+    overhead += (size_mb // 2) // 8
+    overhead = utils.roundup(4096, overhead)
+
+    return overhead
+
 def actual_sr_free_space(size):
-    num = (size - lvutil.LVM_SIZE_INCREMENT - 4096 - vhdutil.calcOverheadEmpty(MSIZE)) * vhdutil.VHD_BLOCK_SIZE
-    den = 4096 + vhdutil.VHD_BLOCK_SIZE
+    num = (size - LVM_SIZE_INCREMENT - 4096 - calcOverheadEmpty(MSIZE)) * VHD_BLOCK_SIZE
+    den = 4096 + VHD_BLOCK_SIZE
 
     return num / den
 
 
-def get_config(scsiid):
+def get_config(ssh, scsiid):
     try:
         retval = True
         config_map = {}
         device = scsiutil._genReverseSCSIidmap(scsiid)[0]
         xencert_print("get_config - device: %s" % device)
         cmd = ["/usr/lib/udev/scsi_id", "--replace-whitespace", "--whitelisted", "--export", device]
-        ret = util.pread2(cmd)
+        ret = utils.pread2(ssh, cmd)
         xencert_print("get_config - scsi_if output: %s" % ret)
         for tuple in ret.split('\n'):
             if tuple.find('=') != -1:
@@ -207,7 +230,7 @@ def get_list_portal_scsi_id_for_iqn(session, server, target_iqn, chapuser=None, 
             device_config['chappassword'] = chappassword
 
         try:
-            session.xenapi.SR.probe(util.get_localhost_ref(session), device_config, 'lvmoiscsi')
+            session.xenapi.SR.probe(utils.get_localhost_ref(session), device_config, 'lvmoiscsi')
         except Exception as e:
             xencert_print("Got the probe data as: %s" % str(e))
             probe_data = e
@@ -242,7 +265,7 @@ def get_list_portal_scsi_id_for_iqn(session, server, target_iqn, chapuser=None, 
                 device_config['targetIQN'] = iqn
                 device_config_tmp = get_config_with_hidden_password(device_config, 'iscsi')
                 xencert_print("Probing with device config: %s" % device_config_tmp)
-                session.xenapi.SR.probe(util.get_localhost_ref(session), device_config, 'lvmoiscsi')
+                session.xenapi.SR.probe(utils.get_localhost_ref(session), device_config, 'lvmoiscsi')
             except Exception as e:
                 xencert_print("Got the probe data as: %s" % str(e))
                 probe_data = e
@@ -320,7 +343,7 @@ def get_hba_information(session, storage_conf, sr_type="lvmohba"):
                 hba_filter[hba] = 1
 
         try:
-            session.xenapi.SR.probe(util.get_localhost_ref(session), device_config, sr_type)
+            session.xenapi.SR.probe(utils.get_localhost_ref(session), device_config, sr_type)
         except Exception as e:
             xencert_print("Got the probe data as: %s " % str(e))
             # Now extract the HBA information from this data.
@@ -416,7 +439,7 @@ def destroy_sr(session, sr_ref):
         raise Exception(str(e))
 
 
-def create_max_size_vdi_and_vbd(session, sr_ref):
+def create_max_size_vdi_and_vbd(session, sr_ref, ssh):
     vdi_ref = None
     vbd_ref = None
     retval = True
@@ -427,9 +450,12 @@ def create_max_size_vdi_and_vbd(session, sr_ref):
             printout("   Create a VDI on the SR of the maximum available size.")
             session.xenapi.SR.scan(sr_ref)
             psize = session.xenapi.SR.get_physical_size(sr_ref)
+            #printout(f"psize is {psize}")
             putil = session.xenapi.SR.get_physical_utilisation(sr_ref)
+            #printout(f"putil is {putil}")
             vdi_size_act = actual_sr_free_space(int(psize) - int(putil))
             vdi_size = str(min(1073741824, vdi_size_act))  # 1073741824 is by wkc hack (1GB)
+            #printout(f"vid size is {vdi_size}")
             xencert_print("Actual SR free space: %d, and used VDI size %s" % (vdi_size_act, vdi_size))
 
             # Populate VDI args
@@ -448,6 +474,7 @@ def create_max_size_vdi_and_vbd(session, sr_ref):
             xencert_print("The VDI create parameters are %s" % args)
             vdi_ref = session.xenapi.VDI.create(args)
             xencert_print("Created new VDI %s" % vdi_ref)
+            #printout("Created new VDI %s" % vdi_ref)
             display_operation_status(True)
         except Exception as e:
             display_operation_status(False)
@@ -455,7 +482,7 @@ def create_max_size_vdi_and_vbd(session, sr_ref):
 
         printout("   Create a VBD on this VDI and plug it into dom0")
         try:
-            vm_uuid = _get_localhost_uuid()
+            vm_uuid = _get_localhost_uuid(ssh)
             xencert_print("Got vm_uuid as %s" % vm_uuid)
             vm_ref = session.xenapi.VM.get_by_uuid(vm_uuid)
             xencert_print("Got vm_ref as %s" % vm_ref)
@@ -480,8 +507,10 @@ def create_max_size_vdi_and_vbd(session, sr_ref):
             args['qos_algorithm_type'] = ''
             args['qos_algorithm_params'] = {}
             xencert_print("The VBD create parameters are %s" % args)
+            #printout("The VBD create parameters are %s" % args)
             vbd_ref = session.xenapi.VBD.create(args)
             xencert_print("Created new VBD %s" % vbd_ref)
+            #printout("Created new VBD %s" % vbd_ref)
             session.xenapi.VBD.plug(vbd_ref)
 
             display_operation_status(True)
@@ -544,24 +573,28 @@ def detach_vdi(session, vbd_ref):
         raise Exception('VDI detach failed. Error: %s' % e)
 
 
-def find_time_to_write_data(devicename, size_in_mib):
+def find_time_to_write_data(ssh, devicename, size_in_mib):
     dd_out_file = 'of=' + devicename
     xencert_print(
         "Now copy %dMiB data from /dev/zero to this device and record the time taken to copy it." % size_in_mib)
     cmd = ['dd', 'if=/dev/zero', dd_out_file, 'bs=4096', 'count=%d' % (size_in_mib * 256)]
     try:
-        (rc, stdout, stderr) = util.doexec(cmd, '')
-        list = stderr.split('\n')
+        #(rc, stdout, stderr) = utils.execSSH(ssh, cmd, '')
+        #list = stderr.split('\n')
+        list = utils.pread(ssh, cmd, '').splitlines()
+        #printout(utils.pread(ssh, cmd, ''))
+        #printout(f"list is {list}")
         time_taken = list[2].split(',')[1]
+        #printout(f"time_taken is {time_taken}")
         data_copy_time = int(float(time_taken.split()[0]))
-        xencert_print("The IO test returned rc: %s stdout: %s, stderr: %s" % (rc, stdout, stderr))
+        #xencert_print("The IO test returned rc: %s stdout: %s, stderr: %s" % (rc, stdout, stderr))
         xencert_print("Time taken to copy %dMiB to the device %s is %d" % (size_in_mib, devicename, data_copy_time))
         return data_copy_time
     except Exception as e:
         raise Exception(str(e))
 
 
-def perform_sr_control_path_tests(session, sr_ref):
+def perform_sr_control_path_tests(session, sr_ref, ssh):
     e = None
     try:
         checkpoint = 0
@@ -569,7 +602,7 @@ def perform_sr_control_path_tests(session, sr_ref):
         vbd_ref = None
         retval = True
 
-        (retval, vdi_ref, vbd_ref, vdi_size) = create_max_size_vdi_and_vbd(session, sr_ref)
+        (retval, vdi_ref, vbd_ref, vdi_size) = create_max_size_vdi_and_vbd(session, sr_ref, ssh)
         if not retval:
             raise Exception("Failed to create max size VDI and VBD.")
 
@@ -579,7 +612,7 @@ def perform_sr_control_path_tests(session, sr_ref):
 
         devicename = dev_path + session.xenapi.VBD.get_device(vbd_ref)
         xencert_print("First finding out the time taken to write 1GB on the device.")
-        time_for_512mib_sec = find_time_to_write_data(devicename, 512)
+        time_for_512mib_sec = find_time_to_write_data(ssh, devicename, 512)
         time_to_write = int((float(vdi_size) / (1024 * 1024 * 1024)) * (time_for_512mib_sec * 2))
 
         if time_to_write > timeLimitControlInSec:
@@ -604,7 +637,7 @@ def perform_sr_control_path_tests(session, sr_ref):
         elif time_to_write > 0:
             printout("   APPROXIMATE RUN TIME: %s seconds." % (time_to_write))
 
-        if not util.zeroOut(devicename, 0, int(vdi_size)):
+        if not utils.zeroOut(ssh, devicename, 0, int(vdi_size)):
             raise Exception(
                 "   - Could not write through the allocated disk space on test disk, please check the log for the exception details.")
 
@@ -642,7 +675,7 @@ def get_lun_scsiid_devicename_mapping(target_iqn, portal):
     lun_to_scsi_id = {}
     path = os.path.join("/dev/iscsi", target_iqn, portal)
     try:
-        for file in util.listdir(path):
+        for file in utils.listdir(path):
             real_path = os.path.realpath(os.path.join(path, file))
             if file.find("LUN") == 0 and file.find("_") == -1:
                 lun = file.replace("LUN", "")
@@ -650,7 +683,7 @@ def get_lun_scsiid_devicename_mapping(target_iqn, portal):
                 lun_to_scsi_id[lun] = (scsi_id, real_path)
 
         return lun_to_scsi_id
-    except util.CommandException:
+    except utils.CommandException:
         xencert_print("Failed to find any LUNs for IQN: %s and portal: %s" % (target_iqn, portal))
         return {}
 
@@ -718,7 +751,7 @@ def parse_config(vendor, product):
     try:
         cmd = "show config"
         xencert_print("mpath cmd: %s" % cmd)
-        (rc, stdout, stderr) = util.doexec(mpath_cli.mpathcmd, cmd)
+        (rc, stdout, stderr) = utils.execSSH(mpath_cli.mpathcmd, cmd)
         xencert_print("mpath output: %s" % stdout)
         d = parse_multipathd_config([line + '\n' for line in stdout.split('\n')])
         xencert_print("mpath config to dict: %s" % d)
@@ -813,16 +846,18 @@ def get_path_status(scsi_id, only_active=False):
     return (retval, list)
 
 
-def _get_localhost_uuid():
-    filename = '/etc/xensource-inventory'
+def _get_localhost_uuid(ssh):
+    domid = utils.parse_xensource_inventory(ssh, 'CONTROL_DOMAIN_UUID')
+    """
     try:
         f = open(filename, 'r')
     except:
         raise xs_errors.XenError('EIO', \
                                  opterr="Unable to open inventory file [%s]" % filename)
     domid = ''
-    for line in filter(util.match_domain_id, f.readlines()):
+    for line in filter(utils.match_domain_id, f.readlines()):
         domid = line.split("'")[1]
+    """
     return domid
 
 
@@ -831,7 +866,7 @@ def disk_data_test(device, test_blocks, sect_of_block=DDT_DEFAULT_BLOCK_SIZE, te
 
     cmd = [DISKDATATEST, 'write', device, str(sect_of_block), str(test_blocks), str(test_time), iter_start]
     xencert_print("The command to be fired is: %s" % cmd)
-    (rc, stdout, stderr) = util.doexec(cmd)
+    (rc, stdout, stderr) = utils.doexec(cmd)
     if rc != 0:
         raise Exception("Disk test write error!")
 
@@ -842,7 +877,7 @@ def disk_data_test(device, test_blocks, sect_of_block=DDT_DEFAULT_BLOCK_SIZE, te
 
     cmd = [DISKDATATEST, 'verify', device, str(sect_of_block), str(write_blocks), str(test_time), iter_start]
     xencert_print("The command to be fired is: %s" % cmd)
-    (rc, stdout, stderr) = util.doexec(cmd)
+    (rc, stdout, stderr) = utils.execSSH(cmd)
     if rc != 0:
         raise Exception("Disk test verify error!")
 
@@ -883,7 +918,7 @@ def _find_lun(svid):
     else:
         globstr = basepath + svid + "*"
 
-    path = util.wait_for_path_multi(globstr, MAX_TIMEOUT)
+    path = utils.wait_for_path_multi(globstr, MAX_TIMEOUT)
     if not len(path):
         return []
 

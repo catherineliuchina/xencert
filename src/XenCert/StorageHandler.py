@@ -19,7 +19,7 @@ import copy
 from threading import Thread
 import time
 import os
-import subprocess
+#import subprocess
 import glob
 import random
 import operator
@@ -28,9 +28,11 @@ from xml.dom import minidom
 import StorageHandlerUtil
 from XenCertLog import printout, print_on_same_line, xencert_print
 from XenCertCommon import display_operation_status, get_config_with_hidden_password, hide_path_info_password
-from sm import scsiutil, iscsilib, util, nfs, metadata
-from sm.lvutil import MDVOLUME_NAME, remove, rename
-from sm.srmetadata import LVMMetadataHandler, updateLengthInHeader, open_file
+#from sm import scsiutil, iscsilib, util, metadata
+#from sm.lvutil import MDVOLUME_NAME, remove, rename
+#from sm.srmetadata import LVMMetadataHandler, updateLengthInHeader, open_file
+import XenAPI
+import utils
 
 
 retValIO = 0
@@ -64,6 +66,7 @@ class TimedDeviceIO(Thread):
     def __init__(self, device):
         Thread.__init__(self)
         self.device = device
+        self.ssh_client = utils.get_ssh_client()
 
     def run(self):
         # Sleep for a period of time before checking for any incomplete snapshots to clean.
@@ -81,7 +84,7 @@ class TimedDeviceIO(Thread):
             bytesCopied = ''
             speedOfCopy = ''
 
-            (retValIO, stdout, stderr) = util.doexec(cmd,'')
+            (retValIO, stdout, stderr) = utils.execSSH(self.ssh_client, cmd,'')
             if retValIO != 0:
                 raise Exception("Disk IO failed for device: %s." % self.device)
             list = stderr.split('\n')
@@ -135,19 +138,20 @@ class StorageHandler(object):
                                          'metadata_latest',
                                          'metadata_of_pool',
                                          'snapshot_time']
-    def __init__(self, storage_conf):
+    def __init__(self, storage_conf, ssh):
         xencert_print("Reached Storagehandler constructor")
         self.storage_conf = storage_conf
-        self.session = util.get_localAPI_session()
+        self.session = utils.get_xapi_session()
         self.sm_config = {}
         self.util_of_param = 'of=%s'
         self.util_pread_cmd = ['dd', 'if=/dev/zero', 'bs=1M', 'count=1', 'oflag=direct']
+        self.ssh_client = ssh
     
     def perform_sr_trim(self, sr_ref):
         try:
             xencert_print("Calling TRIM plugin on SR: %s" %(sr_ref))
             sr_uuid = self.session.xenapi.SR.get_uuid(sr_ref)
-            host_ref = util.get_this_host_ref(self.session)
+            host_ref = utils.get_this_host_ref(self.session, self.ssh_client)
             return self.session.xenapi.host.call_plugin(host_ref, 'trim', 'do_trim', {'sr_uuid': sr_uuid})
         except Exception as e:
             xencert_print("TRIM tests failed due to exception: %s" %(str(e)))
@@ -170,6 +174,7 @@ class StorageHandler(object):
                 printout("   -> Iteration number: %d " % i)
                 total_checkpoints += (2 + pbd_plug_unplug_count)
                 (retval, sr_ref, device_config) = self.create()
+                print('='*20)
                 checkpoint = check_result_for_checkpoint(retval, "      SR creation failed.       ", checkpoint, 1)
                 
                  # Plug and unplug the PBD over multiple iterations
@@ -268,8 +273,8 @@ class StorageHandler(object):
                 iteration_count = int(self.storage_conf['count']) + 1
             
             #1. Enable host Multipathing
-            if not StorageHandlerUtil.is_mp_enabled(self.session, util.get_localhost_ref(self.session)):
-                StorageHandlerUtil.enable_multipathing(self.session, util.get_localhost_ref(self.session))
+            if not StorageHandlerUtil.is_mp_enabled(self.session, utils.get_localhost_ref(self.ssh_client, self.session)):
+                StorageHandlerUtil.enable_multipathing(self.session, utils.get_localhost_ref(self.ssh_client, self.session))
                 disable_mp = True
 
             #2. Create and plug SR
@@ -306,7 +311,7 @@ class StorageHandler(object):
                     self.initial_active_paths += 1
             
             # Now testing failure times for the paths.  
-            (retval, vdi_ref, vbd_ref, vdi_size) = StorageHandlerUtil.create_max_size_vdi_and_vbd(self.session, sr_ref)
+            (retval, vdi_ref, vbd_ref, vdi_size) = StorageHandlerUtil.create_max_size_vdi_and_vbd(self.session, sr_ref, self.ssh_client)
             checkpoint = check_result_for_checkpoint(retval, "Failed to create max size VDI and VBD.", checkpoint, 2)
            
             global retValIO
@@ -441,7 +446,7 @@ class StorageHandler(object):
 
                 # If multipath was enabled by us, disable it, else continue.
             if disable_mp:
-                StorageHandlerUtil.disable_multipathing(self.session, util.get_localhost_ref(self.session))
+                StorageHandlerUtil.disable_multipathing(self.session, utils.get_localhost_ref(self.ssh_client, self.session))
                 
             checkpoint += 1
                 
@@ -459,7 +464,7 @@ class StorageHandler(object):
                 try:
                     device_config['targetIQN'] = iqn
                     device_config['SCSIid'] = scsi_id
-                    sr_ref = self.session.xenapi.SR.create(util.get_localhost_ref(self.session), device_config, '0',
+                    sr_ref = self.session.xenapi.SR.create(utils.get_localhost_ref(self.ssh_client, self.session), device_config, '0',
                                                            'XenCertTestSR', '', 'lvmoiscsi', '', False, {})
                     device_config_tmp = get_config_with_hidden_password(device_config,
                                                                         self.storage_conf['storage_type'])
@@ -564,7 +569,7 @@ class StorageHandler(object):
         for key in list(other_config.keys()):
             if key.find(device_config['SCSIid']):
                 printout(
-                    "      %-50s %-10s " % (util.get_localhost_ref(self.session), ref_other_config[key]))
+                    "      %-50s %-10s " % (utils.get_localhost_ref(self.ssh_client, self.session), ref_other_config[key]))
             break
 
     def pbds_function(self, sr_ref, my_pbd, device_config, ref_other_config):
@@ -608,12 +613,12 @@ class StorageHandler(object):
                     
             # Now check PBDs for this SR and make sure all PBDs reflect the same number of active and passive paths for hosts with multipathing enabled.  
             printout("   -> Checking paths reflected on PBDs for each host.")
-            my_pbd = util.find_my_pbd(self.session, util.get_localhost_ref(self.session), sr_ref)
+            my_pbd = utils.find_my_pbd(self.session, utils.get_localhost_ref(self.ssh_client, self.session), sr_ref)
             ref_other_config = self.session.xenapi.PBD.get_other_config(my_pbd)
             printout("      %-50s %-10s" % ('Host', '[Active, Passive]'))
             for key in list(ref_other_config.keys()):
                 if 'SCSIid' in device_config and (key.find(device_config['SCSIid']) != -1):
-                    printout("      %-50s %-10s" % (util.get_localhost_ref(self.session), ref_other_config[key]))
+                    printout("      %-50s %-10s" % (utils.get_localhost_ref(self.ssh_client, self.session), ref_other_config[key]))
                     break
 
             self.pbds_function(sr_ref, my_pbd, device_config, ref_other_config)
@@ -657,7 +662,7 @@ class StorageHandler(object):
             else:
                 cmd = [os.path.join(os.getcwd(), script), 'unblock', str(no_of_paths), passthrough]
             
-            (rc, stdout, stderr) = util.doexec(cmd,'')
+            (rc, stdout, stderr) = utils.execSSH(cmd,'')
 
             stdout_print = hide_path_info_password(stdout) if self.storage_conf['storage_type'] == 'hba' else stdout
             xencert_print("The path block/unblock utility returned rc: %s stdout: '%s', stderr: '%s'" % (rc, stdout_print, stderr))
@@ -670,7 +675,7 @@ class StorageHandler(object):
     def wait_manual_block_unblock_paths(self):
         try:
             cmd = [self.storage_conf['pathHandlerUtil']]
-            (rc, stdout, stderr) = util.doexec(cmd, '')
+            (rc, stdout, stderr) = utils.doexec(cmd, '')
             xencert_print(
                 "The path manually block/unblock utility returned rc: %s stdout: '%s', stderr: '%s'" % (rc, stdout, stderr))
             if rc != 0:
@@ -680,8 +685,15 @@ class StorageHandler(object):
             raise Exception(e)
     
     def __del__(self):
-        xencert_print("Reached Storagehandler destructor")
-        self.session.xenapi.session.logout() 
+        xencert_print("Reached StorageHandler destructor")
+        try:
+            if self.session is not None and hasattr(self.session, 'xenapi') and self.session.xenapi.session is not None:
+                self.session.xenapi.session.logout()
+                xencert_print("Session logged out successfully")
+            else:
+                xencert_print("Session is already closed")
+        except Exception as e:
+            xencert_print(f"Exception in StorageHandler destructor: {e}")  
         
     def create(self):
         # This class specific function will create an SR of the required type and return the required parameters.
@@ -796,7 +808,7 @@ class StorageHandler(object):
             xencert_print("Creating PBD")
             fields = {}
             if not host_ref:
-                fields['host'] = util.get_localhost_ref(self.session)
+                fields['host'] = utils.get_localhost_ref(self.ssh_client, self.session)
             else:
                 fields['host'] = host_ref
             fields['device_config'] = pbd_device_config
@@ -2032,7 +2044,7 @@ class StorageHandlerISCSI(BlockStorageHandler):
         
     def probe_sr(self):
         try:
-            return self.session.xenapi.SR.probe(util.get_localhost_ref(self.session), self.device_config, "lvmoiscsi", self.sm_config)
+            return self.session.xenapi.SR.probe(utils.get_localhost_ref(self.ssh_client, self.session), self.device_config, "lvmoiscsi", self.sm_config)
         except Exception as e:
             # exceptions are not OK
             xencert_print("Exception probing lvmoiscsi SR with device_config %s "\
@@ -2063,8 +2075,8 @@ class StorageHandlerISCSI(BlockStorageHandler):
                 try:                    
                     device_config['SCSIid'] = scsi_id
                     device_config_tmp = get_config_with_hidden_password(device_config, self.storage_conf['storage_type'])
-                    xencert_print("The SR create parameters are %s, %s  " % (util.get_localhost_ref(self.session), device_config_tmp))
-                    sr_ref = self.session.xenapi.SR.create(util.get_localhost_ref(self.session), device_config, '0', 'XenCertTestSR', '', 'lvmoiscsi', '',True, {})
+                    xencert_print("The SR create parameters are %s, %s  " % (utils.get_localhost_ref(self.ssh_client, self.session), device_config_tmp))
+                    sr_ref = self.session.xenapi.SR.create(utils.get_localhost_ref(self.ssh_client, self.session), device_config, '0', 'XenCertTestSR', '', 'lvmoiscsi', '',True, {})
                     xencert_print("Created the SR %s" % sr_ref)
                     display_operation_status(True)
                     break
@@ -2089,7 +2101,7 @@ class StorageHandlerISCSI(BlockStorageHandler):
             self.map_host_to_ip = StorageHandlerUtil._init_adapters()      
             xencert_print("The host id to IP map is: %s" % self.map_host_to_ip) 
             
-            (retval, config_map) = StorageHandlerUtil.get_config(device_config['SCSIid'])
+            (retval, config_map) = StorageHandlerUtil.get_config(self.ssh_client, device_config['SCSIid'])
             check_result(retval, "   - Failed to get SCSI config information for SCSI Id: %s" % device_config['SCSIid'])
 
             xencert_print("The config map extracted from scsi_id %s is %s" % (device_config['SCSIid'], config_map))
@@ -2239,7 +2251,7 @@ class StorageHandlerISCSI(BlockStorageHandler):
 
                         xencert_print("The filepath is: %s" % filepath)
                         xencert_print("The hbtl_id is %s. The filelist is: %s" % (hbtl_id, filelist))
-                        sectors = util.get_single_entry(filelist[0])
+                        sectors = utils.get_single_entry(filelist[0])
                         size = int(sectors) * 512 / 1024 / 1024
                         printout("     %-23s\t%-4s\t%-34s\t%-10s" % (portal, key, lun_to_scsi[key][0], size))
                         time_for_io_tests_in_sec += StorageHandlerUtil.find_disk_data_test_estimate(lun_to_scsi[key][1], size)
@@ -2299,7 +2311,7 @@ class StorageHandlerISCSI(BlockStorageHandler):
                     path_passed = 0
                     for tuple in scsi_to_tuple_map[key]:                        
                         # If this is a root device then skip IO tests for this device.
-                        if os.path.realpath(util.getrootdev()) == tuple[2]:
+                        if os.path.realpath(utils.getrootdev()) == tuple[2]:
                             printout("     -> Skipping IO tests on device %s, as it is the root device." % tuple[2])
                             continue
                         
@@ -2312,7 +2324,7 @@ class StorageHandlerISCSI(BlockStorageHandler):
                             # First write a small chunk on the device to make sure it works                    
                             xencert_print("First write a small chunk on the device %s to make sure it works." % tuple[2])
                             cmd = self.util_pread_cmd + [self.util_of_param % tuple[2], 'conv=nocreat']
-                            util.pread(cmd)
+                            utils.pread(self.ssh_client, cmd)
                             
                             xencert_print("lun size: %d MB" % tuple[3])
                             StorageHandlerUtil.disk_data_test(tuple[2], StorageHandlerUtil.get_blocks_num(tuple[3]))
@@ -2391,8 +2403,8 @@ class StorageHandlerHBA(BlockStorageHandler):
             for scsi_id in avaiable_scsi_ids:
                 try:
                     device_config['SCSIid'] = scsi_id
-                    xencert_print("The SR create parameters are %s, %s" % (util.get_localhost_ref(self.session), device_config))
-                    sr_ref = self.session.xenapi.SR.create(util.get_localhost_ref(self.session), device_config, '0', 'XenCertTestSR', '', self.sr_type, '',False, {})
+                    xencert_print("The SR create parameters are %s, %s" % (utils.get_localhost_ref(self.ssh_client, self.session), device_config))
+                    sr_ref = self.session.xenapi.SR.create(utils.get_localhost_ref(self.ssh_client, self.session), device_config, '0', 'XenCertTestSR', '', self.sr_type, '',False, {})
                     xencert_print("Created the SR %s using device_config %s" % (sr_ref, device_config))
                     display_operation_status(True)
                     break
@@ -2414,7 +2426,7 @@ class StorageHandlerHBA(BlockStorageHandler):
     def GetPathStatus(self, device_config):
         # Query DM-multipath status, reporting a) Path checker b) Path Priority handler c) Number of paths d) distribution of active vs passive paths
         try:            
-            (retval, config_map) = StorageHandlerUtil.get_config(device_config['SCSIid'])
+            (retval, config_map) = StorageHandlerUtil.get_config(self.ssh_client, device_config['SCSIid'])
             check_result(retval, "   - Failed to get SCSI config information for SCSI Id: %s" % device_config['SCSIid'])
 
             xencert_print("The config map extracted from scsi_id %s is %s" % (device_config['SCSIid'], config_map))
@@ -2530,7 +2542,7 @@ class StorageHandlerHBA(BlockStorageHandler):
                         # will not match the devices exposed on other adapters
                         root_found = False
                         for lun in list_lun_info:
-                            if lun['device'] == os.path.realpath(util.getrootdev()):
+                            if lun['device'] == os.path.realpath(utils.getrootdev()):
                                 xencert_print("Skipping host id %s with root device %s " % (map['id'], lun['device']))
                                 root_found = True
                                 break
@@ -2580,7 +2592,7 @@ class StorageHandlerHBA(BlockStorageHandler):
 
                         xencert_print("The filepath is: %s" % filepath)
                         xencert_print("The hbtl_id is %s. The filelist is: %s" % (hbtl_id, filelist))
-                        sectors = util.get_single_entry(filelist[0])
+                        sectors = utils.get_single_entry(filelist[0])
                         size = int(sectors) * 512 / 1024 / 1024
                         printout("     %-4s\t%-34s\t%-20s\t%-10s" % (lun['id'], lun['SCSIid'], lun['device'], size))
 
@@ -2653,7 +2665,7 @@ class StorageHandlerHBA(BlockStorageHandler):
                     path_passed = 0
                     for device,size in scsi_ids_to_test[key]:
                         # If this is a root device then skip IO tests for this device.
-                        if os.path.realpath(util.getrootdev()) == device:
+                        if os.path.realpath(utils.getrootdev()) == device:
                             printout("     -> Skipping IO tests on device %s, as it is the root device." % device)
                             continue
 
@@ -2666,7 +2678,7 @@ class StorageHandlerHBA(BlockStorageHandler):
                             # First write a small chunk on the device to make sure it works
                             xencert_print("First write a small chunk on the device %s to make sure it works." % device)
                             cmd = self.util_pread_cmd + [self.util_of_param % device, 'conv=nocreat']
-                            util.pread(cmd)
+                            utils.pread(self.ssh_client, cmd)
                             
                             xencert_print("lun size: %d MB" % size)
                             StorageHandlerUtil.disk_data_test(device, StorageHandlerUtil.get_blocks_num(size))
@@ -2711,18 +2723,19 @@ class StorageHandlerHBA(BlockStorageHandler):
 
 class StorageHandlerNFS(StorageHandler):
 
-    def __init__(self, storage_conf):
+    def __init__(self, storage_conf, ssh):
         xencert_print("Reached StorageHandlerNFS constructor")
         self.server = storage_conf['server']
-        self.serverpath = storage_conf['serverpath']        
-        StorageHandler.__init__(self, storage_conf)
+        self.serverpath = storage_conf['serverpath']
+        self.ssh_client = ssh        
+        StorageHandler.__init__(self, storage_conf, self.ssh_client)
 
     def getSupportedNFSVersions(self):
         valid_nfs_versions = ['3', '4']
         supported_versions = []
         try:
-            ns = util.pread2([RPCINFO_BIN, "-t", "%s" % self.server, "nfs"])
-            for l in ns.strip().split("\n"):
+            ns = utils.pread2(self.ssh_client, [RPCINFO_BIN, "-t", "%s" % self.server, "nfs"]).splitlines()
+            for l in ns:
                 if l.split()[3] in valid_nfs_versions:
                     supported_versions.append(l.split()[3])
 
@@ -2741,8 +2754,8 @@ class StorageHandlerNFS(StorageHandler):
             # Create an SR
             printout("      Creating the SR. ")
             # try to create an SR with one of the LUNs mapped, if all fails throw an exception
-            xencert_print("The SR create parameters are %s, %s " % (util.get_localhost_ref(self.session), device_config))
-            sr_ref = self.session.xenapi.SR.create(util.get_localhost_ref(self.session), device_config, '0', 'XenCertTestSR', '', 'nfs', '',False, {})
+            xencert_print("The SR create parameters are %s, %s " % (utils.get_localhost_ref(self.ssh_client, self.session), device_config))
+            sr_ref = self.session.xenapi.SR.create(utils.get_localhost_ref(self.ssh_client, self.session), device_config, '0', 'XenCertTestSR', '', 'nfs', '',False, {})
             xencert_print("Created the SR %s using device_config %s" % (sr_ref, device_config))
             display_operation_status(True)
             
@@ -2762,8 +2775,8 @@ class StorageHandlerNFS(StorageHandler):
 
     def try_display_exported_paths(self, checkpoints):
         try:
-            cmd = [nfs.SHOWMOUNT_BIN, "--no-headers", "-e", self.storage_conf['server']]
-            list = util.pread2(cmd).split('\n')
+            cmd = [utils.SHOWMOUNT_BIN, "--no-headers", "-e", self.storage_conf['server']]
+            list = utils.pread2(self.ssh_client, cmd).split('\n')
             if len(list) > 0:
                 printout("   %-50s" % 'Exported Path')
             for val in list:
@@ -2779,18 +2792,23 @@ class StorageHandlerNFS(StorageHandler):
 
     def try_filesystem_io_tests(self, mountpoint, checkpoints):
         try:
-            testdir = os.path.join(mountpoint, 'XenCertTestDir-%s' % subprocess.getoutput('uuidgen'))
+            uuid = utils.get_ssh_output(self.ssh_client, 'uuidgen')
+            testdir = os.path.join(mountpoint, 'XenCertTestDir-%s' % utils.get_ssh_output(self.ssh_client, 'uuidgen'))
+            #(f"testdir is {testdir}")
             try:
-                os.mkdir(testdir, 755)
+                utils.makedirs(self.ssh_client, testdir, 755)
             except Exception as e:
                 raise Exception("Exception creating directory: %s" % str(e))
             test_dir_create = True
-            testfile = os.path.join(testdir, 'XenCertTestFile-%s' % subprocess.getoutput('uuidgen'))
+            testfile = os.path.join(testdir, 'XenCertTestFile-%s' % utils.get_ssh_output(self.ssh_client,'uuidgen'))
+            #printout(f"testfile is {testfile}")
             cmd = self.util_pread_cmd + [self.util_of_param % testfile]
-            (rc, stdout, stderr) = util.doexec(cmd, '')
+            #printout(f"cmd is {cmd}")
+            #(rc, _, stderr) = utils.pread(self.ssh_client, cmd, '')
+            utils.pread(self.ssh_client, cmd, '')
             test_file_created = True
-            if rc != 0:
-                raise Exception(stderr)
+            #if rc != 0:
+            #    raise Exception(stderr)
             display_operation_status(True)
             checkpoints += 1
         except Exception as e:
@@ -2806,7 +2824,8 @@ class StorageHandlerNFS(StorageHandler):
         test_dir_create = False
         mount_created = False
 
-        mountpoint = '/mnt/XenCertTest-' + subprocess.getoutput('uuidgen') 
+        mountpoint = '/mnt/XenCertTest-' + utils.get_ssh_output(self.ssh_client, 'uuidgen')
+        printout('mountpoint is '+ mountpoint)
         nfs_versions = self.getSupportedNFSVersions()
         for nfsv in nfs_versions:
             printout("Using NFSVersion: %s" % nfsv)
@@ -2823,8 +2842,8 @@ class StorageHandlerNFS(StorageHandler):
                 printout(">> This test attempts to mount the export path specified ")
                 printout(">> as a local directory. ")
                 try:
-                    util.makedirs(mountpoint, 755)
-                    nfs.soft_mount(mountpoint, self.storage_conf['server'], 
+                    utils.makedirs(self.ssh_client, mountpoint, 755)
+                    utils.soft_mount(self.ssh_client, mountpoint, self.storage_conf['server'], 
                                    self.storage_conf['serverpath'], 'tcp', 
                                    timeout=600, nfsversion=nfsv)
                     mount_created = True
@@ -2842,8 +2861,8 @@ class StorageHandlerNFS(StorageHandler):
                 # 3. Report Filesystem target space parameters for verification by user
                 printout("REPORT FILESYSTEM TARGET SPACE PARAMETERS FOR VERIFICATION BY THE USER")
                 try:
-                    printout("  - %-20s: %s" % ('Total space', util.get_fs_size(testdir)))
-                    printout("  - %-20s: %s" % ('Space utilization',util.get_fs_utilisation(testdir)))
+                    printout("  - %-20s: %s" % ('Total space', utils.get_fs_size(self.ssh_client, testdir)))
+                    printout("  - %-20s: %s" % ('Space utilization',utils.get_fs_utilisation(self.ssh_client,testdir)))
                     display_operation_status(True)
                     checkpoints += 1
                 except Exception as e:
@@ -2856,11 +2875,11 @@ class StorageHandlerNFS(StorageHandler):
             # Now perform some cleanup here
             try:
                 if test_file_created:
-                    os.remove(testfile)
+                    utils.remove(self.ssh_client,testfile)
                 if test_dir_create:
-                    os.rmdir(testdir)
+                    utils.rmdir(self.ssh_client,testdir)
                 if mount_created:
-                    nfs.unmount(mountpoint, True)
+                    utils.unmount(self.ssh_client, mountpoint, True)
                 checkpoints += 1
             except Exception as e:
                 printout("   - Failed to cleanup after NFS functional tests, please delete the following manually: %s, %s, %s. Exception: %s" % (testfile, testdir, mountpoint, str(e)))
@@ -2875,6 +2894,7 @@ class StorageHandlerNFS(StorageHandler):
         pbd_plug_unplug_count = 10
 
         nfs_versions = self.getSupportedNFSVersions()
+        #printout(f"nfs_version is {nfs_versions}")
         for nfsv in nfs_versions:
             printout("Using NFSVersion: %s" % nfsv)
             total_checkpoints += 5
@@ -2915,7 +2935,7 @@ class StorageHandlerNFS(StorageHandler):
                     display_operation_status(False)
                     raise e
 
-                (check_point_delta, retval) = StorageHandlerUtil.perform_sr_control_path_tests(self.session, sr_ref)
+                (check_point_delta, retval) = StorageHandlerUtil.perform_sr_control_path_tests(self.session, sr_ref, self.ssh_client)
                 checkpoint = check_result_for_checkpoint(retval, "perform_sr_control_path_tests failed. Please check the logs for details.", checkpoint, check_point_delta)
 
             except Exception as e: 
@@ -2965,8 +2985,8 @@ class StorageHandlerCIFS(StorageHandler):
             # Create an SR on the CIFS server/share provided.
             printout("      Creating the SR. ")
             device_config_tmp = get_config_with_hidden_password(device_config, self.storage_conf['storage_type'])
-            xencert_print("The SR create parameters are %s, %s " % (util.get_localhost_ref(self.session), device_config_tmp))
-            sr_ref = self.session.xenapi.SR.create(util.get_localhost_ref(self.session), device_config, '0', 'XenCertTestSR', '', 'smb', '',False, {})
+            xencert_print("The SR create parameters are %s, %s " % (utils.get_localhost_ref(self.ssh_client, self.session), device_config_tmp))
+            sr_ref = self.session.xenapi.SR.create(utils.get_localhost_ref(self.ssh_client, self.session), device_config, '0', 'XenCertTestSR', '', 'smb', '',False, {})
             xencert_print("Created the SR %s" % sr_ref)
             display_operation_status(True)
 
@@ -3014,16 +3034,16 @@ class StorageHandlerCIFS(StorageHandler):
                 (retval, sr_ref, _trash) = self.create()
                 check_result(retval, "      SR creation failed.     ")
                 test_sr_created = True
-                testdir = "/var/run/sr-mount/%s/XenCertTestDir-%s" % (self.session.xenapi.SR.get_uuid(sr_ref), subprocess.getoutput('uuidgen'))
+                testdir = "/var/run/sr-mount/%s/XenCertTestDir-%s" % (self.session.xenapi.SR.get_uuid(sr_ref), utils.get_ssh_output(self.ssh_client, 'uuidgen'))
 
                 try:
-                    os.mkdir(testdir, 755)
+                    utils.makedirs(self.ssh_client, testdir, 755)
                 except Exception as e:
                     raise Exception("Exception creating directory: %s" % str(e))
                 test_dir_create = True
-                testfile = os.path.join(testdir, 'XenCertTestFile-%s' % subprocess.getoutput('uuidgen'))
+                testfile = os.path.join(testdir, 'XenCertTestFile-%s' % utils.get_ssh_output(self.ssh_client, 'uuidgen'))
                 cmd = self.util_pread_cmd + [self.util_of_param % testfile]
-                (rc, stdout, stderr) = util.doexec(cmd, '')
+                (rc, stdout, stderr) = utils.execSSH(self.ssh_client, cmd, '')
                 test_file_created = True
                 if rc != 0:
                     raise Exception(stderr)
@@ -3036,8 +3056,8 @@ class StorageHandlerCIFS(StorageHandler):
             # 2. Report Filesystem target space parameters for verification by user
             printout("REPORT FILESYSTEM TARGET SPACE PARAMETERS FOR VERIFICATION BY THE USER")
             try:
-                printout("  - %-20s: %s " % ('Total space', util.get_fs_size(testdir)))
-                printout("  - %-20s: %s " % ('Space utilization',util.get_fs_utilisation(testdir)))
+                printout("  - %-20s: %s " % ('Total space', utils.get_fs_size(self.ssh_client, testdir)))
+                printout("  - %-20s: %s " % ('Space utilization',utils.get_fs_utilisation(self.ssh_client, testdir)))
                 display_operation_status(True)
                 checkpoints += 1
             except Exception as e:
@@ -3103,7 +3123,7 @@ class StorageHandlerCIFS(StorageHandler):
                 display_operation_status(False)
                 raise e
 
-            (check_point_delta, retval) = StorageHandlerUtil.perform_sr_control_path_tests(self.session, sr_ref)
+            (check_point_delta, retval) = StorageHandlerUtil.perform_sr_control_path_tests(self.session, sr_ref, self.ssh_client)
             checkpoint = check_result_for_checkpoint(retval, "perform_sr_control_path_tests failed. Please check the logs for details.", checkpoint, check_point_delta)
 
         except Exception as e:
@@ -3290,11 +3310,11 @@ class StorageHandlerGFS2(StorageHandler):
                     device_config['SCSIid'] = scsi_id
                     device_config_tmp = get_config_with_hidden_password(device_config, self.storage_conf['storage_type'])
                     xencert_print("The SR create parameters are {}, {}".format(
-                        util.get_localhost_ref(self.session),
+                        utils.get_localhost_ref(self.ssh_client, self.session),
                         device_config_tmp))
 
                     sr_ref = self.session.xenapi.SR.create(
-                            util.get_localhost_ref(self.session),
+                            utils.get_localhost_ref(self.ssh_client, self.session),
                             device_config,
                             0,
                             "XenCertTestSR",
@@ -3347,7 +3367,7 @@ class StorageHandlerGFS2(StorageHandler):
         return list(avaiable_scsi_ids)
 
 
-def get_storage_handler(g_storage_conf):
+def get_storage_handler(g_storage_conf, ssh):
     # Factory method to instantiate the correct handler
     if g_storage_conf["storage_type"] == "iscsi":
         return StorageHandlerISCSI(g_storage_conf)
@@ -3356,9 +3376,10 @@ def get_storage_handler(g_storage_conf):
         return StorageHandlerHBA(g_storage_conf)
 
     if g_storage_conf["storage_type"] == "nfs":
-        return StorageHandlerNFS(g_storage_conf)
+        return StorageHandlerNFS(g_storage_conf, ssh)
 
     if g_storage_conf["storage_type"] == "cifs":
         return StorageHandlerCIFS(g_storage_conf)
 
     return None
+
