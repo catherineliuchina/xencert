@@ -942,7 +942,7 @@ def _find_lun(svid):
         return [device]
 
 
-def write_data_to_vdi(session, vbd_ref, start_sec, end_sec):
+def write_data_to_vdi(ssh, session, vbd_ref, start_sec, end_sec):
     xencert_print('write_data_to_vdi(vbd_ref=%s, start_sec=%s, end_sec=%s, ->Enter)' \
                   % (vbd_ref, start_sec, end_sec))
     try:
@@ -950,7 +950,8 @@ def write_data_to_vdi(session, vbd_ref, start_sec, end_sec):
 
         xencert_print('about to write onto device: %s' % device)
 
-        with open(device, 'wb') as f:
+        sftp = ssh.open_sftp()
+        with sftp.file(device, 'wb') as f:
             while start_sec <= end_sec:
                 f.seek(start_sec * SECTOR_SIZE)
                 f.write(BUF_PATTERN)
@@ -958,11 +959,13 @@ def write_data_to_vdi(session, vbd_ref, start_sec, end_sec):
     except Exception as e:
         raise Exception('Writing data into VDI:%s Failed. Error: %s' \
                         % (vbd_ref, e))
+    finally:
+        sftp.close()
 
     xencert_print('write_data_to_vdi() -> Exit')
 
 
-def verify_data_on_vdi(session, vbd_ref, start_sec, end_sec):
+def verify_data_on_vdi(ssh, session, vbd_ref, start_sec, end_sec):
     xencert_print('verify_data_on_vdi(vdi_ref=%s, start_sec=%s, end_sec=%s ->Enter)' \
                   % (vbd_ref, start_sec, end_sec))
     try:
@@ -972,7 +975,8 @@ def verify_data_on_vdi(session, vbd_ref, start_sec, end_sec):
 
         expect = BUF_PATTERN
 
-        with open(device, 'rb') as f:
+        sftp = ssh.open_sftp()
+        with sftp.file(device, 'rb') as f:
             while start_sec <= end_sec:
                 f.seek(start_sec * SECTOR_SIZE)
                 actual = f.read(len(expect))
@@ -983,5 +987,7 @@ def verify_data_on_vdi(session, vbd_ref, start_sec, end_sec):
     except Exception as e:
         raise Exception('Verification of data in VDI:%s Failed. Error:%s' \
                         % (vbd_ref, e))
+    finally:
+        sftp.close()
 
     xencert_print('verify_data_on_vdi() -> Exit')

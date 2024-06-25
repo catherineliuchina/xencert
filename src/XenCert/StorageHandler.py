@@ -2968,12 +2968,13 @@ class StorageHandlerNFS(StorageHandler):
 
 class StorageHandlerCIFS(StorageHandler):
 
-    def __init__(self, storage_conf):
+    def __init__(self, storage_conf, ssh):
         xencert_print("Reached StorageHandlerCIFS constructor")
         self.server = storage_conf['server']
         self.username = storage_conf['username']
         self.password = storage_conf['password']
-        StorageHandler.__init__(self, storage_conf)
+        self.ssh_client = ssh
+        StorageHandler.__init__(self, storage_conf, self.ssh_client)
 
     def create(self):
         device_config = {}
@@ -2985,6 +2986,8 @@ class StorageHandlerCIFS(StorageHandler):
             # Create an SR on the CIFS server/share provided.
             printout("      Creating the SR. ")
             device_config_tmp = get_config_with_hidden_password(device_config, self.storage_conf['storage_type'])
+            printout(f"device_config_tmp is {device_config_tmp}")
+            printout(f"get_localhost_ref is {utils.get_localhost_ref(self.ssh_client, self.session)}")
             xencert_print("The SR create parameters are %s, %s " % (utils.get_localhost_ref(self.ssh_client, self.session), device_config_tmp))
             sr_ref = self.session.xenapi.SR.create(utils.get_localhost_ref(self.ssh_client, self.session), device_config, '0', 'XenCertTestSR', '', 'smb', '',False, {})
             xencert_print("Created the SR %s" % sr_ref)
@@ -3043,10 +3046,11 @@ class StorageHandlerCIFS(StorageHandler):
                 test_dir_create = True
                 testfile = os.path.join(testdir, 'XenCertTestFile-%s' % utils.get_ssh_output(self.ssh_client, 'uuidgen'))
                 cmd = self.util_pread_cmd + [self.util_of_param % testfile]
-                (rc, stdout, stderr) = utils.execSSH(self.ssh_client, cmd, '')
+                utils.pread(self.ssh_client, cmd, '')
+                #(rc, _, stderr) = utils.execSSH(self.ssh_client, cmd, '')
                 test_file_created = True
-                if rc != 0:
-                    raise Exception(stderr)
+                #if rc != 0:
+                #    raise Exception(stderr)
                 display_operation_status(True)
                 checkpoints += 1
             except Exception as e:
@@ -3071,9 +3075,9 @@ class StorageHandlerCIFS(StorageHandler):
         if sr_ref:
             try:
                 if test_file_created:
-                    os.remove(testfile)
+                    utils.remove(self.ssh_client,testfile)
                 if test_dir_create:
-                    os.rmdir(testdir)
+                    utils.rmdir(self.ssh_client, testdir)
                 if test_sr_created:
                     StorageHandlerUtil.destroy_sr(self.session, sr_ref)
                 checkpoints += 1
@@ -3150,7 +3154,7 @@ class StorageHandlerCIFS(StorageHandler):
         checkpoint = 0
         total_checkpoints = 11
 
-        vm_uuid = StorageHandlerUtil._get_localhost_uuid()
+        vm_uuid = StorageHandlerUtil._get_localhost_uuid(self.ssh_client)
         xencert_print("Got vm_uuid as %s" % vm_uuid)
         vm_ref = self.session.xenapi.VM.get_by_uuid(vm_uuid)
         sr_ref = None
@@ -3180,7 +3184,7 @@ class StorageHandlerCIFS(StorageHandler):
             checkpoint += 1
 
             #4) Write known pattern to VDI
-            StorageHandlerUtil.write_data_to_vdi(self.session, vbd_ref, 0, 3)
+            StorageHandlerUtil.write_data_to_vdi(self.ssh_client, self.session, vbd_ref, 0, 3)
             printout("Wrote data to VDI")
             checkpoint += 1
 
@@ -3201,7 +3205,7 @@ class StorageHandlerCIFS(StorageHandler):
             checkpoint += 1
 
             #8) Write known pattern to second 4GB chunk
-            StorageHandlerUtil.write_data_to_vdi(self.session, vbd_ref, 4, 7)
+            StorageHandlerUtil.write_data_to_vdi(self.ssh_client, self.session, vbd_ref, 4, 7)
             printout("Wrote data onto grown portion of the VDI")
             checkpoint += 1
 
@@ -3217,7 +3221,7 @@ class StorageHandlerCIFS(StorageHandler):
             checkpoint += 1
 
             #11) Validate pattern on first and second 4GB chunks
-            StorageHandlerUtil.verify_data_on_vdi(self.session, vbd_ref, 0, 7)
+            StorageHandlerUtil.verify_data_on_vdi(self.ssh_client, self.session, vbd_ref, 0, 7)
             printout("Verified data on complete VDI")
             checkpoint += 1
 
@@ -3379,7 +3383,7 @@ def get_storage_handler(g_storage_conf, ssh):
         return StorageHandlerNFS(g_storage_conf, ssh)
 
     if g_storage_conf["storage_type"] == "cifs":
-        return StorageHandlerCIFS(g_storage_conf)
+        return StorageHandlerCIFS(g_storage_conf, ssh)
 
     return None
 
