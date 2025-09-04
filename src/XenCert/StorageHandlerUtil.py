@@ -109,18 +109,46 @@ def disable_multipathing(session, host):
         xencert_print("Exception disabling multipathing. Exception: %s" % str(e))
 
 
+def is_firewall_enabled(session, host):
+    try:
+        cmd = ['systemctl', 'is-active', 'firewalld']
+        (rc, stdout, stderr) = util.doexec(cmd)
+        if rc == 0 and stdout.strip() == 'active':
+            return True
+        else:
+            return False
+    except Exception as e:
+        xencert_print("Exception determining firewalld status. Exception: %s" % str(e))
+        return False
+
+
 def block_ip(ip):
     try:
-        cmd = ['iptables', '-A', 'INPUT', '-s', ip, '-j', 'DROP']
-        util.pread(cmd)
+        if is_firewall_enabled():
+            cmd = ['firewall-cmd', '--permanent', '--add-rich-rule',  
+                       'rule family="ipv4" source address="%s" reject' % ip] 
+            util.pread(cmd)
+            cmd = ['firewall-cmd', '--reload']
+            util.pread(cmd)                    
+        else:
+            cmd = ['iptables', '-A', 'INPUT', '-s', ip, '-j', 'DROP']
+            util.pread(cmd)
+        
     except Exception as e:
         xencert_print("There was an exception in blocking ip: %s. Exception: %s" % (ip, str(e)))
 
 
 def unblock_ip(ip):
     try:
-        cmd = ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP']
-        util.pread(cmd)
+        if is_firewall_enabled():
+            cmd = ['firewall-cmd', '--permanent', '--remove-rich-rule',    
+                          'rule family="ipv4" source address="%s" reject' % ip]
+            util.pread(cmd)
+            cmd = ['firewall-cmd', '--reload']
+            util.pread(cmd)
+        else:
+            cmd = ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP']
+            util.pread(cmd)
     except Exception as e:
         xencert_print("There was an exception in unblocking ip: %s. Exception: %s" % (ip, str(e)))
 

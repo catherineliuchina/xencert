@@ -245,7 +245,7 @@ The test can then be initiated using the following command:
 
 For example if:  
 
-- path_to_share: <a href=http://192.168.100.100/smb_share_5>//192.168.100.100/smb_share_5</a>    
+- path_to_share: //192.168.100.100/smb_share_5  
 - username: jane_doe    
 - password: s3Cure_password  
 
@@ -263,7 +263,7 @@ Valid SMB tests with their respective flags are:
 
 ##### Executing Boot from SAN Multipath tests  
 
-Please follow the following steps below to perform boot from SAN multipath tests manually. For more information, see [boot from san](https://docs.xenserver.com/en-us/xenserver/8/install/advanced-install.html#boot-from-san).
+Please follow the following steps below to perform boot from SAN multipath tests manually. For more information, see [boot from san](https://docs.xenserver.com/en-us/xenserver/9/install/advanced-install.html#boot-from-san).
 
 1. Ensure that your array has boot from SAN capability  
 2. Configure your array for multipath support (multiple paths to the XenServer)  
@@ -278,7 +278,7 @@ Please follow the following steps below to perform boot from SAN multipath tests
 ### Forcing failure in multipath tests  
 Multipath tests are intended to exercise the port failover capabilities within a single host.  Note that these tests only apply to the LVM over iSCSI and LVM over HBA (iscsi, fcoe and hba) storage types.  
 ##### Failing paths with iSCSI storage  
-For failing paths in the case of iSCSI storage, the iptables command can be used. Sample commands for blocking and unblocking paths have been posted in the Appendix A. 
+For failing paths in the case of iSCSI storage, the firewall-cmd command can be used. Sample commands for blocking and unblocking paths have been posted in the Appendix A. 
 ##### Failing paths with HBA storage   
 There are several ways to fail paths in the case of hba storage:  
 
@@ -331,13 +331,17 @@ Execution time: 47 minutes, 42 seconds.
 ### Appendix A-Blocking paths for failover testing  
 
 ##### iSCSI storage type  
-For iSCSI storage type, the paths can be failed over by using the iptables utility:  
+For iSCSI storage type, the paths can be failed over by using the firewall-cmd utility:  
 
-    iptables –A OUTPUT –d <IP address> -j DROP or iptables –A INPUT –s <IP address> -j DROP  
+    firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="<IP address>" reject'
+    firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<IP address>" reject'
+    firewall-cmd --reload  
 
 Subsequently, the paths can be brought online as follows:  
 
-    iptables –D OUTPUT –d <IP address> -j DROP or iptables –D INPUT –s <IP address> -j DROP  
+    firewall-cmd --permanent --remove-rich-rule='rule family="ipv4" destination address="<IP address>" reject'
+    firewall-cmd --permanent --remove-rich-rule='rule family="ipv4" source address="<IP address>" reject'
+    firewall-cmd --reload 
 
 ##### HBA storage type  
 
@@ -601,14 +605,14 @@ The pseudo code for this script can be summarized as:
 
 If it is a block operation:  
 1. Choose noOfPaths paths randomly from the passed in list of IP addresses.  
-2. Block the chosen paths using iptables command:    
+2. Block the chosen paths using firewall-cmd command:    
 ```
-iptables –A INPUT –s ip –j DROP
+firewall-cmd --add-rich-rule='rule family="ipv4" source address="ip" reject'
 ```
 3. Write a comma-separated list of blocked IPs to stdout  
-If it is an unblock operation, then just unblock the passed in list of IP addresses using iptables command:  
+If it is an unblock operation, then just unblock the passed in list of IP addresses using firewall-cmd command:  
 ```
-iptables –D INPUT –s ip –j DROP
+firewall-cmd --remove-rich-rule='rule family="ipv4" source address="ip" reject'
 ```
 In both the cases, set the ‘/xencert/block-unblock-over’ entry in XenStore to ‘1’ and exit.  
 
